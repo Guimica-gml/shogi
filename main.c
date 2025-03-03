@@ -1,6 +1,10 @@
 #define SHOGI_IMPLEMENTATION
 #include "./shogi.h"
 
+// TODO:
+// force promotion when piece has no legal moves
+// stop pawn drop check mates
+
 #include <stdio.h>
 #include <stdint.h>
 #include <raylib.h>
@@ -16,7 +20,7 @@
 #define PIECE_HEIGHT 90.0f
 
 #define HAND_SIZE 0.15f // takes 15% of window (both hands)
-#define HAND_X_PAD 10.0f
+#define HAND_X_PAD 6.0f
 #define HAND_Y_PAD 0.0f
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
@@ -36,11 +40,8 @@ typedef struct {
     Shogi_Mask moves;
 
     // STATE_SELECT_DROP
-    Shogi_Kind kind;
+    Shogi_Kind drop_kind;
     Shogi_Mask drop_positions;
-
-    // Used for drawing
-    RenderTexture2D hand_renders[2];
 } UI;
 
 Rectangle get_atlas_texture_rect(Shogi_Piece piece) {
@@ -70,44 +71,49 @@ bool point_in_rect(float x, float y, float w, float h, float px, float py) {
     return px > x && py > y && px < x + w && py < y + h;
 }
 
-void DrawHandToTexture(
-    RenderTexture2D *target, Shogi *shogi,
-    Texture atlas, Shogi_Color color,
-    float width, float height)
+Shogi_Kind DrawHand(
+    Shogi *shogi, UI *ui, Texture atlas, Shogi_Color color,
+    float x, float y, float board_height)
 {
-    if (!IsRenderTextureValid(*target) ||
-        target->texture.width != width ||
-        target->texture.height != height)
-    {
-        UnloadRenderTexture(*target);
-        *target = LoadRenderTexture(width, height);
-    }
+    Shogi_Kind selected_kind = 0;
 
-    BeginTextureMode(*target);
+    assert(PIECE_WIDTH <= 100.0f && PIECE_HEIGHT <= 100.0f);
+    float dst_height = board_height * 0.09f;
+    float dst_width = dst_height * (PIECE_WIDTH/100.0f);
+
+    float start_x = (color == SHOGI_BLACK) ? x : x - dst_width;
+    float start_y = (color == SHOGI_BLACK) ? y - dst_height : y;
+    float dir  = (color == SHOGI_BLACK) ? 1 : -1;
+
     ClearBackground(BACKGROUND_COLOR);
     for (size_t kind = SHOGI_KIND_COUNT - 1; kind > 0; --kind) {
         Shogi_Piece piece = { color, kind, false };
-
         Rectangle src = get_atlas_texture_rect(piece);
-        if (color == SHOGI_WHITE) {
-            src.height *= -1;
-        }
-
-        assert(PIECE_WIDTH <= 100.0f && PIECE_HEIGHT <= 100.0f);
-        float dst_height = height * 0.09f;
-        float dst_width = dst_height * (PIECE_WIDTH/100.0f);
 
         Rectangle dst;
-        dst.x = 0;
-        dst.y = height - dst_height * (SHOGI_KIND_COUNT - kind);
+        dst.x = start_x;
+        dst.y = start_y - (dst_height * (SHOGI_KIND_COUNT - kind - 1)) * dir;
         dst.width = dst_width;
         dst.height = dst_height;
 
         int32_t count = shogi_hand_piece_count(shogi, color, kind);
         if (count > 0) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                Vector2 mouse = GetMousePosition();
+                if (point_in_rect(dst.x, dst.y, dst.width, dst.height, mouse.x, mouse.y)) {
+                    selected_kind = kind;
+                }
+            }
+
+            if (ui->state == STATE_SELECT_DROP &&
+                ui->drop_kind == kind && shogi->turn == color)
+            {
+                DrawRectangle(dst.x, dst.y, dst.width, dst.height, MOVE_HIGHLIGHT_COLOR);
+            }
+
             for (int32_t j = count; j > 0; --j) {
                 Rectangle actual_dst = dst;
-                actual_dst.x += (dst_width * 0.2) * (j - 1);
+                actual_dst.x += (dst_width * 0.2f) * (j - 1) * dir;
                 DrawTexturePro(atlas, src, actual_dst, (Vector2){0}, 0.0f, WHITE);
             }
         } else {
@@ -115,7 +121,8 @@ void DrawHandToTexture(
             DrawTexturePro(atlas, src, dst, (Vector2){0}, 0.0f, blend);
         }
     }
-    EndTextureMode();
+
+    return selected_kind;
 }
 
 void DrawShogi(Shogi *shogi, UI *ui, Texture atlas, float width, float height) {
@@ -126,34 +133,57 @@ void DrawShogi(Shogi *shogi, UI *ui, Texture atlas, float width, float height) {
     float board_y = (height - board_size) / 2;
     float cell_size = board_size / SHOGI_BOARD_DIM;
 
-    /*
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         Vector2 mouse = GetMousePosition();
         if (point_in_rect(board_x, board_y, board_size, board_size, mouse.x, mouse.y)) {
             size_t x = (mouse.x - board_x) / cell_size;
             size_t y = (mouse.y - board_y) / cell_size;
             Shogi_Cell cell = shogi->board[y][x];
-            if (ui->is_piece_selected && ui->moves.board[y][x]) {
+            if (ui->state == STATE_SELECT_DROP && ui->drop_positions.board[y][x]) {
+                bool drop_allowed = shogi_drop_piece(shogi, shogi->turn, ui->drop_kind, x, y);
+                assert(drop_allowed);
+                ui->state = STATE_IDLE;
+            } else if (ui->state == STATE_SELECT_MOVE && ui->moves.board[y][x]) {
                 bool move_allowed = shogi_move_piece(
                     shogi, ui->selected_piece.x, ui->selected_piece.y, x, y
                 );
                 assert(move_allowed);
-                ui->is_piece_selected = false;
+                ui->state = STATE_IDLE;
             } else if (cell.contains_piece && cell.piece.color == shogi->turn) {
-                ui->is_piece_selected = true;
                 ui->selected_piece = (Vector2) {x, y};
                 ui->moves = shogi_piece_moves_at(shogi, x, y, false);
+                ui->state = STATE_SELECT_MOVE;
             } else {
-                ui->is_piece_selected = false;
+                ui->state = STATE_IDLE;
             }
         } else {
-            ui->is_piece_selected = false;
+            ui->state = STATE_IDLE;
         }
     }
-    */
+
+    {
+        float hand_x = board_x + board_size + HAND_X_PAD;
+        float hand_y = board_y + board_size + HAND_Y_PAD;
+        Shogi_Kind kind = DrawHand(shogi, ui, atlas, SHOGI_BLACK, hand_x, hand_y, board_size);
+        if (kind > 0 && shogi->turn == SHOGI_BLACK) {
+            ui->drop_kind = kind;
+            ui->drop_positions = shogi_drop_piece_locations(shogi, SHOGI_BLACK, kind);
+            ui->state = STATE_SELECT_DROP;
+        }
+    }
+
+    {
+        float hand_x = board_x - HAND_X_PAD;
+        float hand_y = board_y - HAND_Y_PAD;
+        Shogi_Kind kind = DrawHand(shogi, ui, atlas, SHOGI_WHITE, hand_x, hand_y, board_size);
+        if (kind > 0 && shogi->turn == SHOGI_WHITE) {
+            ui->drop_kind = kind;
+            ui->drop_positions = shogi_drop_piece_locations(shogi, SHOGI_WHITE, kind);
+            ui->state = STATE_SELECT_DROP;
+        }
+    }
 
     DrawRectangle(board_x, board_y, board_size, board_size, BOARD_COLOR);
-    /* if (ui->is_piece_selected) { */
     if (ui->state == STATE_SELECT_MOVE) {
         DrawRectangle(
             board_x + ui->selected_piece.x * cell_size,
@@ -182,8 +212,10 @@ void DrawShogi(Shogi *shogi, UI *ui, Texture atlas, float width, float height) {
 
                 DrawTexturePro(atlas, src, dst, (Vector2){0}, 0.0f, WHITE);
             }
-            /* if (ui->is_piece_selected && ui->moves.board[y][x]) { */
-            if (ui->state == STATE_SELECT_MOVE && ui->moves.board[y][x]) {
+
+            if ((ui->state == STATE_SELECT_MOVE && ui->moves.board[y][x]) ||
+                (ui->state == STATE_SELECT_DROP && ui->drop_positions.board[y][x]))
+            {
                 DrawCircle(cx, cy, cell_size * 0.2, MOVE_HIGHLIGHT_COLOR);
             }
         }
@@ -202,37 +234,6 @@ void DrawShogi(Shogi *shogi, UI *ui, Texture atlas, float width, float height) {
             thickness, LINE_COLOR
         );
     }
-
-    float hand_width = (width - board_size) / 2;
-    float hand_height = board_size;
-
-    DrawHandToTexture(
-        &ui->hand_renders[0], shogi, atlas, SHOGI_BLACK, hand_width, hand_height
-    );
-    DrawHandToTexture(
-        &ui->hand_renders[1], shogi, atlas,SHOGI_WHITE, hand_width, hand_height
-    );
-
-    {
-        Rectangle src = { 0, 0, hand_width, -hand_height };
-        Rectangle dst = {
-            board_x + board_size + HAND_X_PAD,
-            board_y - HAND_Y_PAD,
-            hand_width, hand_height,
-        };
-        DrawTexturePro(ui->hand_renders[0].texture, src, dst, (Vector2){0}, 0.0f, WHITE);
-    }
-
-    {
-        Vector2 origin = { hand_width / 2, hand_height / 2 };
-        Rectangle src = { 0, 0, hand_width, -hand_height };
-        Rectangle dst = {
-            board_x - hand_width + origin.x - HAND_X_PAD,
-            board_y + origin.y + HAND_Y_PAD,
-            hand_width, hand_height,
-        };
-        DrawTexturePro(ui->hand_renders[1].texture, src, dst, origin, 180.0f, WHITE);
-    }
 }
 
 int main(void) {
@@ -242,7 +243,7 @@ int main(void) {
     SetWindowMinSize(400, 300);
     SetTargetFPS(60);
 
-    const char *sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b";
+    const char *sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b LNSGKRBP";
 
     Texture atlas = LoadTexture("./shogi-pieces.png");
     SetTextureFilter(atlas, TEXTURE_FILTER_BILINEAR);

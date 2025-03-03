@@ -29,7 +29,7 @@ typedef enum {
 } Shogi_Color;
 
 typedef enum {
-    SHOGI_KING,
+    SHOGI_KING = 0,
     SHOGI_ROOK,
     SHOGI_BISHOP,
     SHOGI_GOLD,
@@ -438,18 +438,24 @@ Shogi_Mask shogi_pawn_moves_at(Shogi *shogi, int32_t x, int32_t y, Shogi_Color c
 }
 
 Shogi_Mask shogi_drop_piece_locations(Shogi *shogi, Shogi_Color color, Shogi_Kind kind) {
-    Shogi_Mask mask;
-    memset(mask.board, 1, SHOGI_BOARD_DIM * SHOGI_BOARD_DIM);
+    Shogi_Mask mask = {0};
+    for (size_t y = 0; y < SHOGI_BOARD_DIM; ++y) {
+        for (size_t x = 0; x < SHOGI_BOARD_DIM; ++x) {
+            Shogi_Cell cell = shogi->board[y][x];
+            mask.board[y][x] = !cell.contains_piece;
+        }
+    }
 
-    size_t row = (color == SHOGI_BLACK) ? SHOGI_BOARD_DIM - 1 : 0;
+    size_t row = (color == SHOGI_WHITE) ? SHOGI_BOARD_DIM - 1 : 0;
     if (kind == SHOGI_PAWN) {
-        memset(mask.board[row], 0, SHOGI_BOARD_DIM);
+        memset(&mask.board[row], 0, SHOGI_BOARD_DIM);
         for (size_t x = 0; x < SHOGI_BOARD_DIM; ++x) {
             bool contains_pawn = false;
             for (size_t y = 0; y < SHOGI_BOARD_DIM; ++y) {
                 if (shogi->board[y][x].contains_piece) {
                     Shogi_Piece piece = shogi->board[y][x].piece;
                     if (piece.kind == SHOGI_PAWN && piece.color == color) {
+                        contains_pawn = true;
                         break;
                     }
                 }
@@ -461,23 +467,35 @@ Shogi_Mask shogi_drop_piece_locations(Shogi *shogi, Shogi_Color color, Shogi_Kin
             }
         }
     } else if (kind == SHOGI_LANCE) {
-        memset(mask.board[row], 0, SHOGI_BOARD_DIM);
+        memset(&mask.board[row], 0, SHOGI_BOARD_DIM);
     } else if (kind == SHOGI_KNIGHT) {
-        size_t dir = (color == SHOGI_BLACK) ? -1 : 1;
-        memset(mask.board[row], 0, SHOGI_BOARD_DIM);
-        memset(mask.board[row + dir], 0, SHOGI_BOARD_DIM);
+        size_t dir = (color == SHOGI_WHITE) ? -1 : 1;
+        memset(&mask.board[row], 0, SHOGI_BOARD_DIM);
+        memset(&mask.board[row + dir], 0, SHOGI_BOARD_DIM);
     }
 
     return mask;
 }
 
 bool shogi_drop_piece(Shogi *shogi, Shogi_Color color, Shogi_Kind kind, int32_t x, int32_t y) {
-    (void) shogi;
-    (void) color;
-    (void) kind;
-    (void) x;
-    (void) y;
-    assert(0 && "unimplemented");
+    if (shogi->turn != color) {
+        return false;
+    }
+
+    if (shogi->hands[color][kind] <= 0) {
+        return false;
+    }
+
+    Shogi_Mask drop_positions = shogi_drop_piece_locations(shogi, color, kind);
+    if (!drop_positions.board[y][x]) {
+        return false;
+    }
+
+    shogi->hands[color][kind] -= 1;
+    shogi->board[y][x].contains_piece = true;
+    shogi->board[y][x].piece = (Shogi_Piece) { color, kind, false };
+    shogi->turn = !shogi->turn;
+    return true;
 }
 
 void shogi_mask_add(Shogi_Mask *dst, Shogi_Mask src) {
